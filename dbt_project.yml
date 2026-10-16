@@ -1,0 +1,74 @@
+name: opengov_revops
+version: "2.0.0"
+config-version: 2
+profile: opengov_snowflake
+require-dbt-version: [">=1.8.0", "<2.0.0"]   # 1.8+ for unit tests
+
+model-paths: ["models"]
+seed-paths: ["seeds"]
+snapshot-paths: ["snapshots"]
+macro-paths: ["macros"]
+test-paths: ["tests"]
+analysis-paths: ["analyses"]
+
+# Audit: every invocation writes one row per model/test/snapshot into <audit schema>.dbt_run_results
+on-run-end:
+  - "{{ log_run_results(results) }}"
+
+vars:
+  # ---------- business calendar (confirm in discovery) ----------
+  business_timezone: "America/New_York"   # Salesforce stores UTC; "today" and dates are in this zone
+  fiscal_year_start_month: 1              # 1 = calendar year. Set to 2 for a Feb-Jan fiscal year, etc.
+  date_spine_start: "2018-01-01"
+  # as_of_date is NOT set here: by default "today" = run start in business_timezone.
+  # Replay any past day:  dbt build --vars '{as_of_date: 2026-10-16}'
+
+  # ---------- at-risk rules (agreed with the RevOps VP; tune without SQL changes) ----------
+  new_deal_activity_grace_days: 7
+  upcoming_activity_horizon_days: 14
+  stale_activity_days: 14
+  closing_soon_days: 30
+  stalled_stage_days: 60
+  close_date_push_threshold: 2
+
+  # ---------- incremental + backfill ----------
+  incremental_lookback_hours: 72          # re-merge rows Fivetran synced in the last 3 days (late updates)
+  pipeline_history_start: "2024-01-01"    # first day of fct_pipeline_daily_snapshot on a fresh build
+  backfill_start_date: null               # --vars '{backfill_start_date: 2025-01-01, backfill_end_date: 2025-03-31}'
+  backfill_end_date: null
+
+  # ---------- optional Salesforce objects (same convention as the Fivetran dbt package) ----------
+  salesforce__opportunity_history_enabled: true   # OPPORTUNITY_HISTORY: velocity, slippage, backfill
+  salesforce__user_enabled: true                  # USER: owner names
+  salesforce__multicurrency_enabled: false        # CurrencyIsoCode + DATED_CONVERSION_RATE
+  corporate_currency: "USD"
+
+  # ---------- data quality ----------
+  max_reasonable_amount: 50000000                 # single deal above this = likely a typo; warn
+
+models:
+  opengov_revops:
+    +persist_docs: {relation: true, columns: true}
+    +query_tag: "dbt_opengov_revops"              # cost attribution in Snowflake QUERY_HISTORY
+    staging:
+      +materialized: view                         # 1:1 with source, cheap, always fresh
+      +schema: staging
+    intermediate:
+      +materialized: ephemeral                    # logic only; heavy/reused ones override to table
+      +schema: intermediate
+    marts:
+      +materialized: table
+      core:
+        +schema: core                             # conformed facts + dimensions
+      revops:
+        +schema: revops                           # the three answers + velocity (BI-facing)
+    audit:
+      +schema: audit
+
+seeds:
+  opengov_revops:
+    +schema: reference
+
+snapshots:
+  opengov_revops:
+    +target_schema: "{{ 'snapshots' if target.name == 'prod' else target.schema ~ '_snapshots' }}"

@@ -1,0 +1,28 @@
+# Copy to ~/.dbt/profiles.yml. Secrets come from environment variables, never from the repo.
+opengov_snowflake:
+  target: dev
+  outputs:
+    dev:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      authenticator: externalbrowser          # SSO for humans
+      role: TRANSFORMER_DEV
+      warehouse: TRANSFORMING_XS_WH
+      database: ANALYTICS_DEV
+      schema: "dbt_{{ env_var('USER', 'dev') }}"   # each engineer builds into their own schemas
+      threads: 8
+      client_session_keep_alive: false
+      query_tag: dbt_dev
+
+    prod:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_PROD_USER') }}"
+      private_key_path: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PATH') }}"   # key-pair auth for the service user
+      role: TRANSFORMER
+      warehouse: TRANSFORMING_XS_WH
+      database: ANALYTICS
+      schema: analytics
+      threads: 8
+      query_tag: dbt_prod

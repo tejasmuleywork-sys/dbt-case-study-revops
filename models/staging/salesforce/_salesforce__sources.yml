@@ -1,0 +1,34 @@
+version: 2
+
+sources:
+  - name: salesforce
+    description: "Salesforce objects landed by Fivetran. Never queried outside staging."
+    database: RAW
+    schema: SALESFORCE
+    loader: fivetran
+    loaded_at_field: _fivetran_synced
+    freshness:                                  # daily SLA: numbers ready by 7 AM business time
+      warn_after: {count: 12, period: hour}
+      error_after: {count: 24, period: hour}    # stale data blocks the build, not the dashboard
+    tables:
+      - name: opportunity
+        columns:
+          - name: opp_id
+            tests: [not_null]
+      - name: account
+      - name: contact
+      - name: activity                          # Salesforce Task + Event
+      - name: user
+        identifier: USER
+        quoting: {identifier: true}             # USER is a Snowflake keyword
+        description: "Not in the case-study extract. First ask to the Fivetran owner."
+        config:
+          enabled: "{{ var('salesforce__user_enabled', true) }}"
+      - name: opportunity_history
+        description: "One row per change to stage, amount, close date, probability or forecast category."
+        config:
+          enabled: "{{ var('salesforce__opportunity_history_enabled', true) }}"
+      - name: dated_conversion_rate
+        freshness: null
+        config:
+          enabled: "{{ var('salesforce__multicurrency_enabled', false) }}"

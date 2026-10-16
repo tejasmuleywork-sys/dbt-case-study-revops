@@ -1,0 +1,33 @@
+# Profile used ONLY by GitHub Actions (CI and deploy). Committed on purpose: it holds no secrets,
+# every value comes from an environment variable that the workflow fills from GitHub secrets/variables.
+# Laptops keep using ~/.dbt/profiles.yml.
+#
+# Auth: key-pair for a dedicated service user (no password, no Duo push, rotates independently).
+#   CI role  : read RAW + read prod schemas (for --defer) + create schemas in the CI database.
+#   Prod role: owns the prod schemas. Different user, different role: a PR can never write to prod.
+opengov_snowflake:
+  target: ci
+  outputs:
+    ci:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      private_key_path: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PATH') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE') }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE') }}"
+      database: "{{ env_var('DBT_CI_DATABASE') }}"
+      schema: "{{ env_var('DBT_CI_SCHEMA', 'ci_local') }}"   # CI_PR_<number> -> CI_PR_42_STAGING, CI_PR_42_REVOPS ...
+      threads: 8
+      query_tag: dbt_ci
+
+    prod:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      private_key_path: "{{ env_var('SNOWFLAKE_PRIVATE_KEY_PATH') }}"
+      role: "{{ env_var('SNOWFLAKE_ROLE') }}"
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE') }}"
+      database: "{{ env_var('DBT_PROD_DATABASE') }}"
+      schema: revops                                         # only used by nodes without a custom schema
+      threads: 8
+      query_tag: dbt_deploy

@@ -1,0 +1,125 @@
+version: 2
+
+models:
+  - name: stg_salesforce__opportunity
+    description: "One row per live Salesforce opportunity. Amount cleaned; NULL kept and flagged; soft and hard deletes removed."
+    columns:
+      - name: opportunity_id
+        tests: [unique, not_null]
+      - name: account_id
+        tests:
+          - not_null
+          - relationships:
+              to: ref('stg_salesforce__accounts')
+              field: account_id
+              config: {severity: warn}          # orphan deal still shows as 'Unknown account'
+      - name: stage_key
+        tests:
+          - relationships:                      # a stage RevOps has not mapped yet fails the build:
+              to: ref('stage_mapping')          # marts keep yesterday's numbers instead of silently dropping deals
+              field: stage_key
+      - name: amount
+        tests:
+          - not_negative
+          - dbt_utils.accepted_range:
+              max_value: "{{ var('max_reasonable_amount') }}"
+              config: {severity: warn}
+          - not_null:                           # late-stage and won deals must be priced
+              config:
+                where: "stage_key in ('proposal', 'negotiation', 'closed won')"
+                severity: warn
+      - name: close_date
+        tests:
+          - not_null:
+              config: {severity: warn}
+      - name: created_date
+        tests: [not_null]                       # catches a date-parsing regression
+    tests:
+      - dbt_utils.expression_is_true:
+          expression: "not coalesce(dq_close_before_created, false)"
+          config: {severity: warn}             # close date before creation = data-entry problem for RevOps ops
+
+  - name: stg_salesforce__accounts
+    columns:
+      - name: account_id
+        tests: [unique, not_null]
+      - name: segment
+        tests:
+          - accepted_values:
+              values: ['Enterprise', 'Mid-Market', 'SMB', 'Unassigned']
+              config: {severity: warn}
+
+  - name: stg_salesforce__contacts
+    columns:
+      - name: contact_id
+        tests: [unique, not_null]
+
+  - name: stg_salesforce__activities
+    columns:
+      - name: activity_id
+        tests: [unique, not_null]
+      - name: activity_date
+        tests:
+          - not_null:
+              config: {severity: warn}          # '2026- 06-10' style values must still parse
+      - name: opportunity_id
+        tests:
+          - relationships:
+              to: ref('stg_salesforce__opportunity')
+              field: opportunity_id
+              config:
+                severity: warn                  # activity on a deleted opp is expected, not fatal
+                where: "not is_deleted"
+
+  - name: stg_salesforce__users
+    columns:
+      - name: user_id
+        tests: [unique, not_null]
+
+  - name: stg_salesforce__hist_opportunity
+    columns:
+      - name: opportunity_history_id
+        tests: [unique, not_null]
+      - name: changed_at_utc
+        tests: [not_null]
+
+
+unit_tests:
+  # Proves the staging rules on the exact rows from the case study, plus two extra traps:
+  # a re-delivered duplicate whose LATEST version is deleted, and an amount with '$' and spaces.
+  - name: stg_opportunities_cleans_case_study_rows
+    model: stg_salesforce__opportunity
+    given:
+      - input: source('salesforce', 'opportunity')
+        rows:
+          - {opp_id: "006A", account_id: "001A", owner_id: "005A", stage_name: "Closed Won",  amount: "250,000", close_date: "2025-03-31", type: "New Business", is_deleted: "FALSE", created_date: "2024-10-01 09:00:00", _fivetran_synced: "2026-10-16 01:00:00"}
+          - {opp_id: "006B", account_id: "001B", owner_id: "005A", stage_name: "Negotiation", amount: "85,000",  close_date: "2026-07-31", type: "New Business", is_deleted: "FALSE", created_date: "2026-02-14 11:30:00", _fivetran_synced: "2026-10-16 01:00:00"}
+          - {opp_id: "006D", account_id: "001D", owner_id: "005B", stage_name: "Prospecting", amount: null,      close_date: "2026-09-30", type: "New Business", is_deleted: "FALSE", created_date: "2026-06-15 14:20:00", _fivetran_synced: "2026-10-16 01:00:00"}
+          - {opp_id: "006F", account_id: "001A", owner_id: "005A", stage_name: "Closed Lost", amount: "75,000",  close_date: "2025-12-31", type: "Expansion",    is_deleted: "FALSE", created_date: "2025-09-01 13:00:00", _fivetran_synced: "2026-10-16 01:00:00"}
+          - {opp_id: "006G", account_id: "001C", owner_id: "005C", stage_name: "Discovery",   amount: null,      close_date: "2026-10-31", type: "New Business", is_deleted: "TRUE",  created_date: "2026-01-05 09:15:00", _fivetran_synced: "2026-10-16 01:00:00"}
+          # duplicate delivery: older copy alive, newest copy deleted -> must be dropped, not resurrected
+          - {opp_id: "006X", account_id: "001A", owner_id: "005A", stage_name: "Proposal",    amount: "$ 10,000 ", close_date: "2026-12-31", type: "New Business", is_deleted: "FALSE", created_date: "2026-01-01 10:00:00", _fivetran_synced: "2026-10-01 01:00:00"}
+          - {opp_id: "006X", account_id: "001A", owner_id: "005A", stage_name: "Proposal",    amount: "$ 10,000 ", close_date: "2026-12-31", type: "New Business", is_deleted: "TRUE",  created_date: "2026-01-01 10:00:00", _fivetran_synced: "2026-10-15 01:00:00"}
+          # messy picklist + money formatting
+          - {opp_id: "006Y", account_id: "001B", owner_id: "005B", stage_name: " closed   won ", amount: "$ 12,500 ", close_date: "2026-06-30", type: null, is_deleted: "FALSE", created_date: "2026-01-02 10:00:00", _fivetran_synced: "2026-10-16 01:00:00"}
+    expect:
+      rows:
+        - {opportunity_id: "006A", amount: 250000, is_amount_missing: false, is_open: false, is_won: true,  is_lost: false, opportunity_type: "New Business", created_date: "2024-10-01"}
+        - {opportunity_id: "006B", amount: 85000,  is_amount_missing: false, is_open: true,  is_won: false, is_lost: false, opportunity_type: "New Business", created_date: "2026-02-14"}
+        - {opportunity_id: "006D", amount: null,   is_amount_missing: true,  is_open: true,  is_won: false, is_lost: false, opportunity_type: "New Business", created_date: "2026-06-15"}
+        - {opportunity_id: "006F", amount: 75000,  is_amount_missing: false, is_open: false, is_won: false, is_lost: true,  opportunity_type: "Expansion",    created_date: "2025-09-01"}
+        - {opportunity_id: "006Y", amount: 12500,  is_amount_missing: false, is_open: false, is_won: true,  is_lost: false, opportunity_type: "Unknown",      created_date: "2026-01-02"}
+
+  - name: stg_activities_parses_spaced_dates_and_keeps_tombstones
+    model: stg_salesforce__activities
+    given:
+      - input: source('salesforce', 'activity')
+        rows:
+          - {activity_id: "00TA", opp_id: "006B", contact_id: "003B", type: "Call",  activity_date: "2026- 06-10", is_deleted: "FALSE", _fivetran_synced: "2026-10-16 01:00:00"}
+          - {activity_id: "00TB", opp_id: "006B", contact_id: "003B", type: "email", activity_date: "2026- 06-12", is_deleted: "FALSE", _fivetran_synced: "2026-10-16 01:00:00"}
+          - {activity_id: "00TZ", opp_id: "006B", contact_id: "003B", type: "Call",  activity_date: "06/20/2026",  is_deleted: "TRUE",  _fivetran_synced: "2026-10-16 01:00:00"}
+    expect:
+      rows:
+        - {activity_id: "00TA", activity_type: "Call",  activity_date: "2026-06-10", is_deleted: false}
+        - {activity_id: "00TB", activity_type: "Email", activity_date: "2026-06-12", is_deleted: false}
+        - {activity_id: "00TZ", activity_type: "Call",  activity_date: "2026-06-20", is_deleted: true}

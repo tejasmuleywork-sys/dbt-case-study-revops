@@ -1,0 +1,24 @@
+# dbt build output
+target/
+dbt_packages/
+dbt_internal_packages/
+logs/
+.user.yml
+
+# local Python
+.venv/
+__pycache__/
+
+# secrets: NEVER commit
+.env
+.env.*
+profiles.yml
+profiles.old.yml
+!ci/profiles.yml
+*.p8
+*.pem
+set-dev-env*.ps1
+
+# CI scratch / OS
+prod-state/
+.DS_Store

@@ -1,0 +1,246 @@
+# dbt CI: every pull request into main must pass this before it can merge.
+#
+# Job 1  static  (no warehouse, ~1 min, runs on every PR incl. forks and drafts)
+#        secret scan -> YAML lint -> dbt parse -> project rules (layering, naming, PK tests, incremental safety)
+# Job 2  build   (Snowflake, isolated CI_PR_<n> schemas, skipped for forks and drafts)
+#        connection -> SQL lint on changed files -> freshness (info) -> build changed models + downstream
+#        (unit tests, data tests, contracts) -> second run of incrementals/snapshots -> impact report vs prod
+#
+# Only what the PR changed is built (state:modified+); everything upstream is read from prod (--defer).
+name: dbt CI
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review]
+    paths:
+      - "models/**"
+      - "macros/**"
+      - "snapshots/**"
+      - "seeds/**"
+      - "tests/**"
+      - "analyses/**"
+      - "dbt_project.yml"
+      - "packages.yml"
+      - "selectors.yml"
+      - "requirements.txt"
+      - "ci/**"
+      - "scripts/ci/**"
+      - ".sqlfluff"
+      - ".yamllint.yml"
+      - ".github/workflows/dbt_ci.yml"
+  workflow_dispatch:
+
+# A new push to the same PR cancels the run in progress: no paying for outdated commits.
+concurrency:
+  group: dbt-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  actions: read            # download the prod manifest artifact from the deploy workflow
+  pull-requests: write     # post the impact report on the PR
+
+env:
+  PYTHON_VERSION: "3.11"
+  DBT_PROFILES_DIR: ci
+  DBT_SEND_ANONYMOUS_USAGE_STATS: "false"
+
+jobs:
+  static:
+    name: Static checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # dbt parse never connects. Placeholders only satisfy env_var() in ci/profiles.yml.
+      SNOWFLAKE_ACCOUNT: placeholder
+      SNOWFLAKE_USER: placeholder
+      SNOWFLAKE_PRIVATE_KEY_PATH: /dev/null
+      SNOWFLAKE_ROLE: placeholder
+      SNOWFLAKE_WAREHOUSE: placeholder
+      DBT_CI_DATABASE: placeholder
+      DBT_PROD_DATABASE: placeholder
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dbt + linters
+        run: pip install -r requirements.txt
+
+      - name: Secret scan (no keys, profiles or .env committed)
+        run: |
+          bad_files=$(git ls-files | grep -E '(^|/)(profiles(\.old)?\.yml|\.env(\..*)?|.*\.p8|.*\.pem)$' | grep -v '^ci/profiles.yml$' || true)
+          if [ -n "$bad_files" ]; then
+            echo "::error title=Secret file committed::$bad_files"; exit 1
+          fi
+          if git grep -nE -- '-----BEGIN ([A-Z]+ )?PRIVATE KEY-----|password:[[:space:]]*["'"'"']?[^"'"'"'{[:space:]]' -- ':!*.md' ':!.github/'; then
+            echo "::error title=Secret in code::A private key or a literal password is committed. Use env_var() and GitHub secrets."; exit 1
+          fi
+
+      - name: YAML lint (duplicate keys, bad indentation)
+        run: yamllint -c .yamllint.yml .
+
+      - name: dbt deps
+        run: dbt deps
+
+      - name: dbt parse (Jinja, refs, YAML schema, configs)
+        run: dbt parse --target ci
+
+      - name: Fetch prod manifest (for change-aware rules)
+        id: state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci/get_prod_manifest.sh prod-state
+
+      - name: Project rules (layering, naming, docs, PK tests, incremental safety)
+        run: |
+          state_arg=""
+          if [ "${{ steps.state.outputs.found }}" = "true" ]; then state_arg="--state prod-state/manifest.json"; fi
+          python scripts/ci/check_project_rules.py target/manifest.json $state_arg
+
+  build:
+    name: Build & test changed models (Snowflake)
+    needs: static
+    # Forks never receive secrets; drafts only get the cheap static checks.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository && !github.event.pull_request.draft)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    env:
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ secrets.DBT_CI_USER }}
+      SNOWFLAKE_ROLE: ${{ vars.DBT_CI_ROLE }}
+      SNOWFLAKE_WAREHOUSE: ${{ vars.DBT_CI_WAREHOUSE }}
+      DBT_CI_DATABASE: ${{ vars.DBT_CI_DATABASE }}
+      DBT_PROD_DATABASE: ${{ vars.DBT_PROD_DATABASE }}
+      # One schema family per PR: CI_PR_42_STAGING, CI_PR_42_CORE ... Two PRs never collide, prod is never touched.
+      DBT_CI_SCHEMA: CI_PR_${{ github.event.pull_request.number || github.run_id }}
+      BASE_REF: ${{ github.base_ref || 'main' }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0                 # needed to diff against main for the SQL lint
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dbt + linters
+        run: pip install -r requirements.txt
+
+      - name: Write Snowflake private key
+        env:
+          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.DBT_CI_PRIVATE_KEY }}
+        run: |
+          umask 077
+          printf '%s\n' "$SNOWFLAKE_PRIVATE_KEY" > "$RUNNER_TEMP/snowflake_key.p8"
+          echo "SNOWFLAKE_PRIVATE_KEY_PATH=$RUNNER_TEMP/snowflake_key.p8" >> "$GITHUB_ENV"
+
+      - name: dbt deps
+        run: dbt deps
+
+      - name: dbt debug (auth, role, warehouse)
+        run: dbt debug --target ci
+
+      - name: Fetch prod manifest
+        id: state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci/get_prod_manifest.sh prod-state
+
+      - name: Decide what to build
+        id: sel
+        run: |
+          if [ "${{ steps.state.outputs.found }}" = "true" ]; then
+            # Slim CI: only changed nodes + everything downstream; unchanged parents are read from prod.
+            echo "build_args=--select state:modified+ --defer --state prod-state" >> "$GITHUB_OUTPUT"
+            echo "rerun_args=--select state:modified+,config.materialized:incremental state:modified+,resource_type:snapshot --defer --state prod-state" >> "$GITHUB_OUTPUT"
+          else
+            echo "build_args=" >> "$GITHUB_OUTPUT"
+            echo "rerun_args=--select config.materialized:incremental resource_type:snapshot" >> "$GITHUB_OUTPUT"
+          fi
+          # Cost guard: CI builds 35 days of daily pipeline history, not everything since 2024.
+          echo "CI_VARS={pipeline_history_start: '$(date -u -d '35 days ago' +%F)'}" >> "$GITHUB_ENV"
+
+      - name: SQL lint (changed files only)
+        run: |
+          git fetch --no-tags origin "$BASE_REF"
+          files=$(git diff --name-only --diff-filter=ACMR "origin/$BASE_REF...HEAD" -- 'models/*.sql' 'snapshots/*.sql' || true)
+          if [ -z "$files" ]; then echo "No changed SQL files."; exit 0; fi
+          echo "$files"
+          sqlfluff lint $files --format github-annotation-native
+
+      - name: Source freshness (informational)
+        run: |
+          dbt source freshness --target ci || \
+            echo "::warning title=Stale source data::RAW data is older than the SLA. Not a code problem, but expect test failures on recent data."
+
+      - name: dbt build (changed models + downstream, all tests)
+        run: |
+          dbt build --target ci ${{ steps.sel.outputs.build_args }} --vars "$CI_VARS"
+          cp target/run_results.json run_results_build.json
+
+      - name: Second run of incrementals + snapshots (exercises the is_incremental() / merge path)
+        run: |
+          dbt build --target ci ${{ steps.sel.outputs.rerun_args }} --vars "$CI_VARS"
+          cp target/run_results.json run_results_rerun.json
+
+      - name: Impact report vs prod
+        if: steps.state.outputs.found == 'true' && github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          models=$(dbt ls --target ci --resource-type model --state prod-state --output json --output-keys name \
+                     --select "state:modified+,path:models/marts,config.materialized:table" \
+                              "state:modified+,path:models/marts,config.materialized:incremental" \
+                   | grep '^{' | jq -r .name | paste -sd, -)
+          if [ -z "$models" ]; then echo "No changed marts to compare."; exit 0; fi
+
+          dbt --quiet run-operation ci_compare_to_prod --target ci \
+              --args "{models: [$models], prod_database: $DBT_PROD_DATABASE}" | grep '^CI_DIFF|' > diff.txt || true
+
+          {
+            echo "### dbt impact report (CI vs prod)"
+            echo
+            echo "| Model | Status | Rows prod | Rows CI | Only in prod | Only in CI | Columns added | Columns removed |"
+            echo "|---|---|---:|---:|---:|---:|---|---|"
+            awk -F'|' '{printf "| `%s` | %s | %s | %s | %s | %s | %s | %s |\n", $2,$3,$4,$5,$6,$7,$8,$9}' diff.txt
+            echo
+            echo "_Prod was built earlier today, CI just now: a handful of differing rows can be normal. Thousands, or a removed column, is not._"
+          } > report.md
+
+          cat report.md >> "$GITHUB_STEP_SUMMARY"
+          gh pr comment "$PR" --edit-last --body-file report.md 2>/dev/null || gh pr comment "$PR" --body-file report.md
+
+      - name: Run summary
+        if: always()
+        run: |
+          for f in run_results_build.json run_results_rerun.json; do
+            [ -f "$f" ] || continue
+            {
+              echo "### dbt results: ${f#run_results_}"
+              jq -r '.results | group_by(.status) | map("- **\(.[0].status)**: \(length)") | .[]' "$f"
+              jq -r '.results[] | select(.status == "fail" or .status == "error") | "- ❌ `\(.unique_id)`: \(.message // "" | gsub("\n"; " ") | .[0:200])"' "$f"
+            } >> "$GITHUB_STEP_SUMMARY"
+          done
+
+      - name: Upload dbt artifacts (debugging)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbt-ci-artifacts-${{ github.run_id }}
+          path: |
+            target/manifest.json
+            run_results_*.json
+            target/run_results.json
+            target/compiled/
+            logs/dbt.log
+          retention-days: 14
+          if-no-files-found: ignore

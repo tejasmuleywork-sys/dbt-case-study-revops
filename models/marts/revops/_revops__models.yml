@@ -1,0 +1,103 @@
+version: 2
+
+models:
+  - name: mart_revops__pipeline
+    description: "Q1. Open pipeline by stage, in corporate currency. Unpriced deals are counted, not valued at 0."
+    config:
+      contract: {enforced: true}             # a promise to BI: names and types will not drift
+    columns:
+      - {name: stage_order,                data_type: "number(3,0)",  tests: [unique, not_null]}
+      - {name: stage_name,                 data_type: varchar,        tests: [not_null]}
+      - {name: forecast_category,          data_type: varchar}
+      - {name: open_opportunity_count,     data_type: "number(18,0)"}
+      - {name: unpriced_opportunity_count, data_type: "number(18,0)"}
+      - {name: total_pipeline,             data_type: "number(38,2)"}
+      - {name: weighted_pipeline,          data_type: "number(38,2)"}
+      - {name: as_of_date,                 data_type: date}
+    tests:
+      - sums_match:                          # the aggregate always ties to the detail
+          column_name: total_pipeline
+          compare_model: ref('fct_opportunities')
+          compare_column: amount_usd
+          compare_filter: "is_open"
+
+  - name: mart_revops__at_risk_deals
+    description: "Q2. Open deals that trip at least one transparent rule; reasons as an array and as text."
+    columns:
+      - name: opportunity_id
+        tests: [unique, not_null]
+      - name: risk_score
+        tests:
+          - dbt_utils.accepted_range: {min_value: 1, max_value: 8}
+
+  - name: mart_revops__bookings_qoq
+    description: "Q3. Bookings by fiscal quarter and type with like-for-like QoQ comparison. Filter is_rollup before summing."
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: ['quarter_start_date', 'opportunity_type']
+
+  - name: mart_revops__deal_velocity
+    description: "Days from first Prospecting to Closed Won. Use grouping_level = 'segment' for the VP's question."
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: ['grouping_level', 'segment', 'opportunity_type', 'close_fiscal_quarter_label']
+
+
+unit_tests:
+  # The exact case-study numbers: Negotiation 85,000 / 63,750; total 500,000 / 242,750; 006D unpriced.
+  - name: pipeline_mart_matches_case_study
+    model: mart_revops__pipeline
+    overrides:
+      vars: {as_of_date: "2026-10-16"}
+    given:
+      - input: ref('fct_opportunities')
+        rows:
+          - {opportunity_id: "006B", is_open: true,  stage_order: 4, stage_name: "Negotiation", forecast_category: "Commit",    amount_usd: 85000,  weighted_amount_usd: 63750,  is_amount_missing: false}
+          - {opportunity_id: "006C", is_open: true,  stage_order: 3, stage_name: "Proposal",    forecast_category: "Best Case", amount_usd: 320000, weighted_amount_usd: 160000, is_amount_missing: false}
+          - {opportunity_id: "006D", is_open: true,  stage_order: 1, stage_name: "Prospecting", forecast_category: "Pipeline",  amount_usd: null,   weighted_amount_usd: null,   is_amount_missing: true}
+          - {opportunity_id: "006E", is_open: true,  stage_order: 2, stage_name: "Discovery",   forecast_category: "Pipeline",  amount_usd: 95000,  weighted_amount_usd: 19000,  is_amount_missing: false}
+          - {opportunity_id: "006A", is_open: false, stage_order: 5, stage_name: "Closed Won",  forecast_category: "Closed",    amount_usd: 250000, weighted_amount_usd: 250000, is_amount_missing: false}
+          - {opportunity_id: "006H", is_open: false, stage_order: 5, stage_name: "Closed Won",  forecast_category: "Closed",    amount_usd: 85000,  weighted_amount_usd: 85000,  is_amount_missing: false}
+    expect:
+      rows:
+        - {stage_name: "Prospecting", open_opportunity_count: 1, unpriced_opportunity_count: 1, total_pipeline: 0,      weighted_pipeline: 0}
+        - {stage_name: "Discovery",   open_opportunity_count: 1, unpriced_opportunity_count: 0, total_pipeline: 95000,  weighted_pipeline: 19000}
+        - {stage_name: "Proposal",    open_opportunity_count: 1, unpriced_opportunity_count: 0, total_pipeline: 320000, weighted_pipeline: 160000}
+        - {stage_name: "Negotiation", open_opportunity_count: 1, unpriced_opportunity_count: 0, total_pipeline: 85000,  weighted_pipeline: 63750}
+
+  # Each rule fires on its own, and a scheduled meeting stops a deal counting as idle.
+  - name: at_risk_rules_fire_independently
+    model: mart_revops__at_risk_deals
+    overrides:
+      vars: {as_of_date: "2026-10-16", stale_activity_days: 14, closing_soon_days: 30, stalled_stage_days: 60, close_date_push_threshold: 2}
+    given:
+      - input: ref('fct_opportunities')
+        rows:
+          # case-study deal: past close date + idle + stalled  -> 3
+          - {opportunity_id: "006B", is_open: true, stage_order: 4, close_date: "2026-07-31", is_amount_missing: false, days_since_last_activity: 126, upcoming_activity_count: 0, close_date_push_count: 0, stage_regression_count: 0, days_in_current_stage: 244, amount_usd: 85000}
+          # healthy deal: recent activity, future close, young stage -> not flagged
+          - {opportunity_id: "H001", is_open: true, stage_order: 3, close_date: "2026-12-15", is_amount_missing: false, days_since_last_activity: 3,   upcoming_activity_count: 1, close_date_push_count: 0, stage_regression_count: 0, days_in_current_stage: 10,  amount_usd: 50000}
+          # idle on paper but a meeting is booked -> only closing-soon rule (Discovery closing in 10 days)
+          - {opportunity_id: "M001", is_open: true, stage_order: 2, close_date: "2026-10-26", is_amount_missing: false, days_since_last_activity: 40,  upcoming_activity_count: 1, close_date_push_count: 0, stage_regression_count: 0, days_in_current_stage: 20,  amount_usd: 40000}
+          # Proposal with no amount, pushed twice, moved backwards -> 3
+          - {opportunity_id: "P001", is_open: true, stage_order: 3, close_date: "2026-12-31", is_amount_missing: true,  days_since_last_activity: 5,   upcoming_activity_count: 0, close_date_push_count: 2, stage_regression_count: 1, days_in_current_stage: 15,  amount_usd: null}
+          # closed deal never appears
+          - {opportunity_id: "006A", is_open: false, stage_order: 5, close_date: "2025-03-31", is_amount_missing: false, days_since_last_activity: 500, upcoming_activity_count: 0, close_date_push_count: 5, stage_regression_count: 0, days_in_current_stage: 500, amount_usd: 250000}
+    expect:
+      rows:
+        - {opportunity_id: "006B", risk_score: 3, is_past_close_date: true,  is_stale: true,  is_stalled_in_stage: true,  is_repeatedly_pushed: false}
+        - {opportunity_id: "M001", risk_score: 1, is_past_close_date: false, is_stale: false, is_stalled_in_stage: false, is_repeatedly_pushed: false}
+        - {opportunity_id: "P001", risk_score: 3, is_past_close_date: false, is_stale: false, is_stalled_in_stage: false, is_repeatedly_pushed: true}
+
+
+exposures:
+  - name: revops_monday_pipeline_dashboard
+    type: dashboard
+    maturity: medium
+    owner: {name: RevOps Analytics, email: revops-analytics@opengov.com}
+    description: "Replaces the two-hour manual Monday Salesforce pull: pipeline by stage, at-risk deals, bookings QoQ."
+    depends_on:
+      - ref('mart_revops__pipeline')
+      - ref('mart_revops__at_risk_deals')
+      - ref('mart_revops__bookings_qoq')
+      - ref('mart_revops__deal_velocity')

@@ -1,0 +1,34 @@
+# Copy this file to ~/.dbt/profiles.yml   (Windows: C:\Users\<you>\.dbt\profiles.yml)
+# Fill in the <...> values. The password is NOT written here: it is read from an environment variable.
+opengov_snowflake:
+  target: "{{ env_var('TARGET_ENV', 'dev') }}"
+  outputs:
+    prod:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"        # Snowsight > bottom-left account menu > Account > copy identifier; use a dash, e.g. ABCDEFG-XY12345
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      password: "{{ env_var('SNOWFLAKE_PASSWORD') }}"
+      # If your account forces MFA, uncomment the next two lines (approve the Duo push when dbt connects):
+      # authenticator: username_password_mfa
+      # client_store_temporary_credential: true
+      role: "{{ env_var('SNOWFLAKE_ROLE') }}"                    # or SYSADMIN: needs to create schemas in ANALYTICS
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE') }}"                 # the default warehouse in a trial account
+      database: "{{ env_var('SNOWFLAKE_DATABASE') }}"                   # where dbt builds models (RAW stays read-only)
+      schema: "{{ env_var('SNOWFLAKE_SCHEMA') }}"                     # your schemas become DBT_TEJAS_STAGING, DBT_TEJAS_REVOPS, ...
+      threads: 4
+      query_tag: dbt_prod
+
+    dev:
+      type: snowflake
+      account: "{{ env_var('SNOWFLAKE_ACCOUNT') }}"        # Snowsight > bottom-left account menu > Account > copy identifier; use a dash, e.g. ABCDEFG-XY12345
+      user: "{{ env_var('SNOWFLAKE_USER') }}"
+      password: "{{ env_var('SNOWFLAKE_PASSWORD') }}"
+      # If your account forces MFA, uncomment the next two lines (approve the Duo push when dbt connects):
+      # authenticator: username_password_mfa
+      # client_store_temporary_credential: true
+      role: "{{ env_var('SNOWFLAKE_ROLE') }}"                    # or SYSADMIN: needs to create schemas in ANALYTICS
+      warehouse: "{{ env_var('SNOWFLAKE_WAREHOUSE') }}"                 # the default warehouse in a trial account
+      database: "{{ env_var('SNOWFLAKE_DATABASE') }}"                   # where dbt builds models (RAW stays read-only)
+      schema: "{{ env_var('SNOWFLAKE_SCHEMA') }}"                     # your schemas become DBT_TEJAS_STAGING, DBT_TEJAS_REVOPS, ...
+      threads: 4
+      query_tag: dbt_dev

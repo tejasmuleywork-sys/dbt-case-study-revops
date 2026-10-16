@@ -1,0 +1,27 @@
+version: 2
+
+seeds:
+  - name: stage_mapping
+    description: >
+      RevOps-owned reference data: one row per Salesforce stage. Probabilities are a sign-off item
+      with the VP and change only through a reviewed pull request (an audit trail for free).
+      stage_key is the lower-cased, whitespace-normalised stage name used for joining, so
+      'Closed  Won' or 'closed won' in Salesforce still map.
+    config:
+      column_types:
+        stage_key: varchar
+        stage_name: varchar
+        stage_order: number(3,0)
+        stage_probability: number(5,4)
+        forecast_category: varchar
+        is_closed: boolean
+        is_won: boolean
+    columns:
+      - name: stage_key
+        tests: [unique, not_null]
+      - name: stage_order
+        tests: [unique, not_null]
+      - name: stage_probability
+        tests:
+          - not_null
+          - dbt_utils.accepted_range: {min_value: 0, max_value: 1}

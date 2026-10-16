@@ -1,0 +1,80 @@
+version: 2
+
+models:
+  - name: dim_date
+    description: "One row per calendar day with calendar and fiscal attributes. The single definition of 'quarter'."
+    columns:
+      - name: date_day
+        tests: [unique, not_null]
+
+  - name: dim_account
+    description: "SCD Type 2 account dimension. One current row per account; history from the day the snapshot started."
+    columns:
+      - name: account_key
+        tests: [unique, not_null]
+    tests:
+      - dbt_utils.unique_combination_of_columns:       # exactly one CURRENT row per account
+          combination_of_columns: ['account_id']
+          config: {where: "is_current"}
+      - dbt_utils.mutually_exclusive_ranges:           # versions never overlap in time
+          lower_bound_column: valid_from
+          upper_bound_column: valid_to
+          partition_by: account_id
+          gaps: not_allowed
+
+  - name: dim_user
+    description: "One row per Salesforce user (current state) with manager name for team roll-ups."
+    columns:
+      - name: user_id
+        tests: [unique, not_null]
+
+  - name: fct_opportunities
+    description: "One row per live opportunity (current state)."
+    columns:
+      - name: opportunity_id
+        tests: [unique, not_null]
+      - name: amount_usd
+        tests: [not_negative]
+      - name: weighted_amount_usd
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: "<= amount_usd"
+              config: {where: "amount_usd is not null"}
+      - name: close_date
+        tests:
+          - dbt_utils.expression_is_true:                # a won deal dated in the future is not a booking yet
+              expression: "<= as_of_date"
+              config: {where: "is_won", severity: warn}
+      - name: amount
+        tests:
+          - not_null:
+              config: {where: "is_won", severity: warn}  # won deal without amount = missing bookings
+      - name: days_since_last_activity
+        tests:
+          - not_negative                                 # future-dated activities must not count as "last"
+
+  - name: fct_activities
+    description: "Live activities for analysts: a view over int_activities__deduped with deleted rows removed."
+    columns:
+      - name: activity_id
+        tests: [unique, not_null]
+
+  - name: fct_pipeline_daily_snapshot
+    description: "One row per open opportunity per business day. Incremental, backfillable, never fully refreshed."
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: ['snapshot_date', 'opportunity_id']
+    columns:
+      - name: snapshot_date
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: "<= current_date() + 1"
+
+  - name: fct_opportunity_stage_history
+    description: "One row per opportunity per stage entered (a stage visit), with days spent in it. Feeds velocity."
+    columns:
+      - name: stage_visit_key
+        tests: [unique, not_null]
+      - name: days_in_stage
+        tests: [not_negative]

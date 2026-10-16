@@ -1,0 +1,14 @@
+version: 2
+
+models:
+  - name: audit_pipeline_reconciliation
+    description: >
+      Business audit log: headline numbers at every layer for every as_of_date. Long format
+      (one metric per row) so adding a metric never needs a schema change. Pairs with the
+      operational log <audit schema>.DBT_RUN_RESULTS written by the on-run-end hook.
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: ['as_of_date', 'metric_name']
+    columns:
+      - name: metric_value
+        tests: [not_null]

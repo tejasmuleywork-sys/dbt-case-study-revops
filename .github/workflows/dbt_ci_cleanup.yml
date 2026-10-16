@@ -1,0 +1,55 @@
+# When a PR is closed or merged, drop its CI_PR_<n>_* schemas so CI never leaves storage (and clutter) behind.
+name: dbt CI cleanup
+
+on:
+  pull_request:
+    branches: [main]
+    types: [closed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "PR number whose CI schemas to drop"
+        required: true
+
+permissions:
+  contents: read
+
+env:
+  DBT_PROFILES_DIR: ci
+  DBT_SEND_ANONYMOUS_USAGE_STATS: "false"
+
+jobs:
+  drop-schemas:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ secrets.DBT_CI_USER }}
+      SNOWFLAKE_ROLE: ${{ vars.DBT_CI_ROLE }}
+      SNOWFLAKE_WAREHOUSE: ${{ vars.DBT_CI_WAREHOUSE }}
+      DBT_CI_DATABASE: ${{ vars.DBT_CI_DATABASE }}
+      DBT_PROD_DATABASE: unused
+      PR_NUMBER: ${{ inputs.pr_number || github.event.pull_request.number }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Write Snowflake private key
+        env:
+          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.DBT_CI_PRIVATE_KEY }}
+        run: |
+          umask 077
+          printf '%s\n' "$SNOWFLAKE_PRIVATE_KEY" > "$RUNNER_TEMP/snowflake_key.p8"
+          echo "SNOWFLAKE_PRIVATE_KEY_PATH=$RUNNER_TEMP/snowflake_key.p8" >> "$GITHUB_ENV"
+
+      - name: Drop CI_PR_<n> schemas
+        run: |
+          dbt deps
+          dbt run-operation drop_ci_schemas --target ci --args "{prefix: CI_PR_${PR_NUMBER}}"

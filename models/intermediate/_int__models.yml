@@ -1,0 +1,43 @@
+version: 2
+
+models:
+  - name: int_opportunity_state__events
+    description: "One row per opportunity state change. History + current state, consecutive duplicates collapsed."
+    columns:
+      - name: opportunity_event_key
+        tests: [unique, not_null]
+    tests:
+      - dbt_utils.unique_combination_of_columns:
+          combination_of_columns: ['opportunity_id', 'event_sequence']
+
+  - name: int_activities__deduped
+    description: "Incremental, de-duplicated activities incl. deleted tombstones. Feeds the rollup and fct_activities."
+    columns:
+      - name: activity_id
+        tests: [unique, not_null]
+
+  - name: int_activities__by_opportunity
+    description: "One row per opportunity with activity counts, past vs upcoming as of as_of_date."
+    columns:
+      - name: opportunity_id
+        tests: [unique, not_null]
+
+  - name: int_opportunities__change_metrics
+    description: "One row per opportunity: close-date pushes, regressions, reopen and days in current stage."
+    columns:
+      - name: opportunity_id
+        tests: [unique, not_null]
+
+  - name: int_opportunities__enriched
+    description: "Opportunity grain. The tests below are the fan-out guard for every join in this model."
+    tests:
+      - dbt_utils.equal_rowcount:
+          compare_model: ref('stg_salesforce__opportunity')
+    columns:
+      - name: opportunity_id
+        tests: [unique, not_null]
+      - name: is_stage_unmapped
+        tests:
+          - accepted_values:
+              values: [false]
+              quote: false

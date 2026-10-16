@@ -1,0 +1,7 @@
+stage_key,stage_name,stage_order,stage_probability,forecast_category,is_closed,is_won
+prospecting,Prospecting,1,0.10,Pipeline,false,false
+discovery,Discovery,2,0.20,Pipeline,false,false
+proposal,Proposal,3,0.50,Best Case,false,false
+negotiation,Negotiation,4,0.75,Commit,false,false
+closed won,Closed Won,5,1.00,Closed,true,true
+closed lost,Closed Lost,6,0.00,Omitted,true,false

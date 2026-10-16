@@ -1,0 +1,122 @@
+# dbt deploy: after a PR merges into main, apply the change to production right away
+# (so dashboards don't wait for tomorrow's scheduled run), then publish the new prod manifest.
+# That manifest is what the next PR's CI compares against (state:modified) and defers to.
+#
+# The daily scheduled run (Airflow / orchestrator) is separate: it runs `dbt build --selector daily`
+# on the same main branch. This workflow only promotes code changes.
+name: dbt deploy (prod)
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "models/**"
+      - "macros/**"
+      - "snapshots/**"
+      - "seeds/**"
+      - "tests/**"
+      - "dbt_project.yml"
+      - "packages.yml"
+      - "selectors.yml"
+      - "requirements.txt"
+      - "ci/**"
+  workflow_dispatch:
+    inputs:
+      full_build:
+        description: "Build every model, not only what changed since the last deploy"
+        type: boolean
+        default: false
+
+# Never two prod deploys at once, and never cancel one halfway (a half-applied deploy is worse than a queued one).
+concurrency:
+  group: dbt-prod-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  actions: read
+
+env:
+  PYTHON_VERSION: "3.11"
+  DBT_PROFILES_DIR: ci
+  DBT_SEND_ANONYMOUS_USAGE_STATS: "false"
+
+jobs:
+  deploy:
+    name: Deploy to prod
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    # GitHub Environment "production": holds the prod secrets and can require a reviewer's approval.
+    environment: production
+    env:
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ secrets.DBT_PROD_USER }}
+      SNOWFLAKE_ROLE: ${{ vars.DBT_PROD_ROLE }}
+      SNOWFLAKE_WAREHOUSE: ${{ vars.DBT_PROD_WAREHOUSE }}
+      DBT_PROD_DATABASE: ${{ vars.DBT_PROD_DATABASE }}
+      DBT_CI_DATABASE: unused
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dbt
+        run: pip install -r requirements.txt
+
+      - name: Write Snowflake private key
+        env:
+          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.DBT_PROD_PRIVATE_KEY }}
+        run: |
+          umask 077
+          printf '%s\n' "$SNOWFLAKE_PRIVATE_KEY" > "$RUNNER_TEMP/snowflake_key.p8"
+          echo "SNOWFLAKE_PRIVATE_KEY_PATH=$RUNNER_TEMP/snowflake_key.p8" >> "$GITHUB_ENV"
+
+      - name: dbt deps + debug
+        run: |
+          dbt deps
+          dbt debug --target prod
+
+      - name: Project rules (last line of defence, e.g. a direct push to main)
+        run: |
+          dbt parse --target prod
+          python scripts/ci/check_project_rules.py target/manifest.json
+
+      - name: Fetch last deployed manifest
+        id: state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci/get_prod_manifest.sh prod-state
+
+      - name: dbt build (prod)
+        run: |
+          if [ "${{ steps.state.outputs.found }}" = "true" ] && [ "${{ inputs.full_build }}" != "true" ]; then
+            # Only what changed since the last successful deploy, plus everything downstream.
+            # A failed deploy never publishes its manifest, so the next deploy retries the same changes.
+            dbt build --target prod --select state:modified+ --state prod-state
+          else
+            dbt build --target prod
+          fi
+          # Never --full-refresh here: full_refresh=false models hold history that cannot be rebuilt.
+
+      - name: Generate docs
+        run: dbt docs generate --target prod
+
+      - name: Publish prod manifest (read by the next CI run)
+        uses: actions/upload-artifact@v4
+        with:
+          name: prod-manifest
+          path: target/manifest.json
+          retention-days: 90
+
+      - name: Publish docs site
+        uses: actions/upload-artifact@v4
+        with:
+          name: dbt-docs
+          path: |
+            target/index.html
+            target/manifest.json
+            target/catalog.json
+          retention-days: 30

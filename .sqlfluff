@@ -1,0 +1,27 @@
+# SQL lint, run by CI on CHANGED files only (legacy files are not blocked retroactively).
+# Layout rules are off on purpose: we hand-align aliases and comments for readability.
+# The rules kept are the ones that catch real ambiguity or bugs, not taste.
+[sqlfluff]
+dialect = snowflake
+templater = dbt
+max_line_length = 160
+rules = capitalisation.keywords, capitalisation.functions, capitalisation.literals, ambiguous.distinct, ambiguous.union, ambiguous.join, aliasing.unique.table, aliasing.self_alias.column, structure.unused_cte, structure.distinct, convention.is_null, references.special_chars
+
+[sqlfluff:templater:dbt]
+project_dir = .
+profiles_dir = ci
+profile = opengov_snowflake
+target = ci
+
+[sqlfluff:rules:capitalisation.keywords]
+capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.functions]
+extended_capitalisation_policy = lower
+
+[sqlfluff:rules:capitalisation.literals]
+capitalisation_policy = lower
+
+[sqlfluff:rules:ambiguous.join]
+# "join" alone is an inner join, but say so: makes fan-out reviews faster
+fully_qualify_join_types = inner

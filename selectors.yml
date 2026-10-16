@@ -1,0 +1,26 @@
+selectors:
+  - name: daily
+    description: "The scheduled weekday job: everything, tests included, in DAG order."
+    default: true
+    definition:
+      method: fqn
+      value: "*"
+
+  - name: pipeline_history_backfill
+    description: >
+      Rebuild a date range of fct_pipeline_daily_snapshot (and its tests) without touching anything else.
+      dbt build --selector pipeline_history_backfill --vars '{backfill_start_date: 2025-01-01, backfill_end_date: 2025-03-31}'
+    definition:
+      method: fqn
+      value: fct_pipeline_daily_snapshot
+
+  - name: revops_marts
+    description: "Just the BI-facing answers and everything upstream of them (ad-hoc refresh)."
+    definition:
+      union:
+        - method: fqn
+          value: "+mart_revops__pipeline"
+        - method: fqn
+          value: "+mart_revops__at_risk_deals"
+        - method: fqn
+          value: "+mart_revops__bookings_qoq"
