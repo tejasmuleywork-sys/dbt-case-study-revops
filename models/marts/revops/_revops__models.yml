@@ -74,15 +74,15 @@ unit_tests:
       - input: ref('fct_opportunities')
         rows:
           # case-study deal: past close date + idle + stalled  -> 3
-          - {opportunity_id: "006B", is_open: true, stage_order: 4, close_date: "2026-07-31", is_amount_missing: false, days_since_last_activity: 126, upcoming_activity_count: 0, close_date_push_count: 0, stage_regression_count: 0, days_in_current_stage: 244, amount_usd: 85000}
+          - {opportunity_id: "006B", is_open: true, stage_order: 4, close_date: "2026-07-31", is_amount_missing: false, last_activity_date: "2026-06-12", days_open: 260, days_since_last_activity: 126, upcoming_activity_count: 0, close_date_push_count: 0, stage_regression_count: 0, days_in_current_stage: 244, amount_usd: 85000}
           # healthy deal: recent activity, future close, young stage -> not flagged
-          - {opportunity_id: "H001", is_open: true, stage_order: 3, close_date: "2026-12-15", is_amount_missing: false, days_since_last_activity: 3,   upcoming_activity_count: 1, close_date_push_count: 0, stage_regression_count: 0, days_in_current_stage: 10,  amount_usd: 50000}
+          - {opportunity_id: "H001", is_open: true, stage_order: 3, close_date: "2026-12-15", is_amount_missing: false, last_activity_date: "2026-10-13", days_open: 30, days_since_last_activity: 3,   upcoming_activity_count: 1, close_date_push_count: 0, stage_regression_count: 0, days_in_current_stage: 10,  amount_usd: 50000}
           # idle on paper but a meeting is booked -> only closing-soon rule (Discovery closing in 10 days)
-          - {opportunity_id: "M001", is_open: true, stage_order: 2, close_date: "2026-10-26", is_amount_missing: false, days_since_last_activity: 40,  upcoming_activity_count: 1, close_date_push_count: 0, stage_regression_count: 0, days_in_current_stage: 20,  amount_usd: 40000}
+          - {opportunity_id: "M001", is_open: true, stage_order: 2, close_date: "2026-10-26", is_amount_missing: false, last_activity_date: "2026-09-06", days_open: 60, days_since_last_activity: 40,  upcoming_activity_count: 1, close_date_push_count: 0, stage_regression_count: 0, days_in_current_stage: 20,  amount_usd: 40000}
           # Proposal with no amount, pushed twice, moved backwards -> 3
-          - {opportunity_id: "P001", is_open: true, stage_order: 3, close_date: "2026-12-31", is_amount_missing: true,  days_since_last_activity: 5,   upcoming_activity_count: 0, close_date_push_count: 2, stage_regression_count: 1, days_in_current_stage: 15,  amount_usd: null}
+          - {opportunity_id: "P001", is_open: true, stage_order: 3, close_date: "2026-12-31", is_amount_missing: true,  last_activity_date: "2026-10-11", days_open: 90, days_since_last_activity: 5,   upcoming_activity_count: 0, close_date_push_count: 2, stage_regression_count: 1, days_in_current_stage: 15,  amount_usd: null}
           # closed deal never appears
-          - {opportunity_id: "006A", is_open: false, stage_order: 5, close_date: "2025-03-31", is_amount_missing: false, days_since_last_activity: 500, upcoming_activity_count: 0, close_date_push_count: 5, stage_regression_count: 0, days_in_current_stage: 500, amount_usd: 250000}
+          - {opportunity_id: "006A", is_open: false, stage_order: 5, close_date: "2025-03-31", is_amount_missing: false, last_activity_date: "2025-03-01", days_open: 500, days_since_last_activity: 500, upcoming_activity_count: 0, close_date_push_count: 5, stage_regression_count: 0, days_in_current_stage: 500, amount_usd: 250000}
     expect:
       rows:
         - {opportunity_id: "006B", risk_score: 3, is_past_close_date: true,  is_stale: true,  is_stalled_in_stage: true,  is_repeatedly_pushed: false}
