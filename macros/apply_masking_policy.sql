@@ -4,7 +4,7 @@
   The policy itself lives in scripts/snowflake_setup.sql (owned by the platform team).
 -#}
 {% macro apply_masking_policy(column_name, policy_name) -%}
-    {%- if target.name == 'prod' -%}
+    {%- if target.name == 'prod' and var('enable_masking', false) -%}
         alter {{ 'view' if model.config.materialized == 'view' else 'table' }} {{ this }}
             modify column {{ column_name }}
             set masking policy {{ target.database }}.governance.{{ policy_name }}
