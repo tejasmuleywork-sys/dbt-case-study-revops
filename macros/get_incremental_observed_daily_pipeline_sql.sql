@@ -1,10 +1,25 @@
-{# A single atomic MERGE replaces today's observation without deleting other dates.
-   The incoming relation is a materialized temp TABLE, not a re-evaluated view.
-   Explicit column lists avoid positional mistakes when generating tombstone rows. #}
+{#-
+  Custom incremental strategy for fct_pipeline_daily_snapshot: ONE atomic MERGE per run.
+
+  Rows of the target that are "in scope" for this run are compared with the incoming rows:
+    in scope + still incoming  -> updated
+    in scope + not incoming    -> deleted  (deal closed / deleted since that day was last written: tombstone)
+    incoming + not in target   -> inserted
+    out of scope               -> never touched
+
+  Scope (from pipeline_snapshot_window):
+    daily run            today's rows, any source
+    backfill / replay    reconstructed rows inside rec_start..rec_end; OBSERVED rows are never in scope,
+                         so a backfill can never overwrite what was actually observed.
+
+  The incoming relation is a materialized temp TABLE (tmp_relation_type='table'), not a re-evaluated view.
+  Explicit column lists avoid positional mistakes when generating tombstone rows.
+-#}
 {% macro get_incremental_observed_daily_pipeline_sql(arg_dict) %}
     {% set target_relation = arg_dict['target_relation'] %}
     {% set temp_relation = arg_dict['temp_relation'] %}
     {% set dest_columns = arg_dict['dest_columns'] %}
+    {% set w = pipeline_snapshot_window() %}
     {% set insert_columns = [] %}
     {% set source_values = [] %}
     {% set incoming_columns = [] %}
@@ -26,7 +41,17 @@
         union all
         select {{ existing_columns | join(', ') }}, true as _delete_row
         from {{ target_relation }} as existing
-        where existing.snapshot_date = {{ as_of_date() }}
+        where (
+              {% if w.observe_today -%}
+              existing.snapshot_date = {{ as_of_date() }}
+              {%- else -%}
+              false
+              {%- endif %}
+              {% if w.has_rec -%}
+              or (existing.snapshot_date between '{{ w.rec_start }}'::date and '{{ w.rec_end }}'::date
+                  and coalesce(existing.snapshot_source, 'observed') <> 'observed')
+              {%- endif %}
+          )
           and not exists (
               select 1 from {{ temp_relation }} as incoming
               where incoming.snapshot_date = existing.snapshot_date

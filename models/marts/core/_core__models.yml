@@ -60,7 +60,10 @@ models:
         tests: [unique, not_null]
 
   - name: fct_pipeline_daily_snapshot
-    description: "One row per open opportunity per business day. Incremental, backfillable, never fully refreshed."
+    description: >
+      One row per open opportunity per business day. Daily runs add today's OBSERVED rows; past days are
+      RECONSTRUCTED from OpportunityHistory by the backfill (scripts/backfill_pipeline_history.sh).
+      Observed days are never overwritten. Incremental, never fully refreshed.
     tests:
       - dbt_utils.unique_combination_of_columns:
           combination_of_columns: ['snapshot_date', 'opportunity_id']
@@ -70,6 +73,11 @@ models:
           - not_null
           - dbt_utils.expression_is_true:
               expression: "<= current_date() + 1"
+      - name: snapshot_source
+        description: "observed | reconstructed | reconstructed_assumed (NULL = observed row written before this column existed)"
+        tests:
+          - accepted_values:
+              values: ['observed', 'reconstructed', 'reconstructed_assumed']
 
   - name: fct_opportunity_stage_history
     description: "One row per opportunity per stage entered (a stage visit), with days spent in it. Feeds velocity."

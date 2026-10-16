@@ -36,6 +36,7 @@ vars:
   pipeline_history_start: "2024-01-01"    # first day of fct_pipeline_daily_snapshot on a fresh build
   backfill_start_date: null               # --vars '{backfill_start_date: 2025-01-01, backfill_end_date: 2025-03-31}'
   backfill_end_date: null
+  backfill_anchor_first_known_state: false  # true = days before a deal's first known state reuse that state (labelled reconstructed_assumed)
 
   # ---------- optional Salesforce objects (same convention as the Fivetran dbt package) ----------
   salesforce__opportunity_history_enabled: true   # OPPORTUNITY_HISTORY: velocity, slippage, backfill

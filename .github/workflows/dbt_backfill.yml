@@ -1,0 +1,67 @@
+# Manual, approved backfill of the daily pipeline history in prod.
+# GitHub > Actions > "dbt backfill (prod)" > Run workflow > start / end dates.
+# Runs the same monthly-chunk script engineers use locally, with the prod service user,
+# behind the "production" environment approval. Every run is logged here and in AUDIT.DBT_RUN_RESULTS.
+name: dbt backfill (prod)
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: "First day to reconstruct (YYYY-MM-DD)"
+        required: true
+      end_date:
+        description: "Last day to reconstruct (YYYY-MM-DD, must be before today). Empty = yesterday"
+        required: false
+        default: ""
+
+# Never at the same time as a deploy: both write fct_pipeline_daily_snapshot.
+concurrency:
+  group: dbt-prod-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  DBT_PROFILES_DIR: ci
+  DBT_SEND_ANONYMOUS_USAGE_STATS: "false"
+
+jobs:
+  backfill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    environment: production
+    env:
+      SNOWFLAKE_ACCOUNT: ${{ secrets.SNOWFLAKE_ACCOUNT }}
+      SNOWFLAKE_USER: ${{ secrets.DBT_PROD_USER }}
+      SNOWFLAKE_ROLE: ${{ vars.DBT_PROD_ROLE }}
+      SNOWFLAKE_WAREHOUSE: ${{ vars.DBT_PROD_WAREHOUSE }}
+      DBT_PROD_DATABASE: ${{ vars.DBT_PROD_DATABASE }}
+      DBT_CI_DATABASE: unused
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Write Snowflake private key
+        env:
+          SNOWFLAKE_PRIVATE_KEY: ${{ secrets.DBT_PROD_PRIVATE_KEY }}
+        run: |
+          umask 077
+          printf '%s\n' "$SNOWFLAKE_PRIVATE_KEY" > "$RUNNER_TEMP/snowflake_key.p8"
+          echo "SNOWFLAKE_PRIVATE_KEY_PATH=$RUNNER_TEMP/snowflake_key.p8" >> "$GITHUB_ENV"
+
+      - name: dbt deps
+        run: dbt deps
+
+      - name: Backfill in monthly chunks
+        env:
+          START: ${{ inputs.start_date }}
+          END: ${{ inputs.end_date }}
+        run: bash scripts/backfill_pipeline_history.sh "$START" "${END:-$(date -u -d 'yesterday' +%F)}" prod
